@@ -26,7 +26,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -45,7 +45,7 @@ jobs:
           shasum -a 256 "sheetpack-${{ matrix.target }}.tar.gz" \
             > "sheetpack-${{ matrix.target }}.tar.gz.sha256"
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             sheetpack-${{ matrix.target }}.tar.gz
