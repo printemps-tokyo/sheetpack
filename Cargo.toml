@@ -2,6 +2,7 @@
 name = "sheetpack"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 license = "MIT"
 description = "Pack sprites into texture atlases from the command line, built for CI: deterministic output, engine-ready manifests (TexturePacker-style JSON, Phaser 3 multiatlas, Godot 4 .tres, CSS) and a --check mode that fails the build when an atlas is stale."
 authors = ["printemps.tokyo <develop@printemps.tokyo>"]
