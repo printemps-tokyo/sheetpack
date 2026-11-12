@@ -42,6 +42,12 @@ pub struct Frame {
     pub h: u32,
     /// Source geometry, for `spriteSourceSize` / Godot margins.
     pub geom: SpriteGeom,
+    /// True when the sprite is stored rotated 90 degrees clockwise on the
+    /// page (it then occupies `h` x `w` there); `w`/`h` stay unrotated, as
+    /// TexturePacker-JSON readers expect.
+    pub rotated: bool,
+    /// 9-slice borders, when the slices file names this frame.
+    pub borders: Option<crate::extras::Borders>,
 }
 
 /// One rendered page: an image file plus the frames that live on it.
@@ -68,6 +74,8 @@ pub struct Meta {
     pub settings: String,
     /// Prefix for image paths in Godot `.tres` output, e.g. `res://`.
     pub godot_base: String,
+    /// Animation groups (name, frames in order), when requested.
+    pub animations: Vec<(String, Vec<String>)>,
 }
 
 /// Tool name embedded in manifests.

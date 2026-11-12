@@ -4,8 +4,8 @@
 //! Bin" (2010): keep a list of maximal free rectangles, place each sprite in
 //! the free rectangle that leaves the smallest short-side leftover, then split
 //! every free rectangle the placement overlaps and prune the ones that end up
-//! contained in another. No rotation -- rotated frames complicate every
-//! consumer and are off by design.
+//! contained in another. Rotation is opt-in (`PackOptions::rotate`): a sprite
+//! is then also tried turned 90 degrees, and kept upright on equal scores.
 //!
 //! Determinism is a feature, not an accident: sprites are sorted by a total
 //! order (tallest-or-widest first, ties by area, ties by caller-given index,
@@ -52,6 +52,8 @@ pub struct PackOptions {
     pub pot: bool,
     /// Force final pages square.
     pub square: bool,
+    /// Allow a sprite to be placed rotated 90 degrees when that fits better.
+    pub rotate: bool,
 }
 
 /// One sprite placed on one page.
@@ -66,6 +68,9 @@ pub struct Placement {
     pub x: u32,
     /// Y of the sprite's pixels on the page.
     pub y: u32,
+    /// True when the sprite is placed rotated 90 degrees (its page footprint
+    /// is then `h` x `w`).
+    pub rotated: bool,
 }
 
 /// One finished page: placements plus the trimmed-to-content page size.
@@ -106,30 +111,41 @@ impl MaxRects {
         }
     }
 
-    /// Place a `w` x `h` rectangle, best-short-side-fit. Returns its top-left.
-    fn insert(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
-        let mut best: Option<(u32, u32, u32, u32, usize)> = None; // short, long, y, x, idx
+    /// Place a `w` x `h` rectangle, best-short-side-fit, also trying it turned to `h` x `w` when
+    /// `rotate` is set. Returns its top-left and whether it was turned. On
+    /// equal scores the unrotated placement wins, so turning on rotation
+    /// changes nothing for sprites that fit as well either way.
+    fn insert_any(&mut self, w: u32, h: u32, rotate: bool) -> Option<(u32, u32, bool)> {
+        // short, long, y, x, rotated, idx
+        let mut best: Option<(u32, u32, u32, u32, bool, usize)> = None;
         for (i, f) in self.free.iter().enumerate() {
-            if f.w < w || f.h < h {
-                continue;
-            }
-            let short = (f.w - w).min(f.h - h);
-            let long = (f.w - w).max(f.h - h);
-            let key = (short, long, f.y, f.x, i);
-            if best.is_none_or(|b| key < b) {
-                best = Some(key);
+            for turned in [false, true] {
+                if turned && (!rotate || w == h) {
+                    continue;
+                }
+                let (cw, ch) = if turned { (h, w) } else { (w, h) };
+                if f.w < cw || f.h < ch {
+                    continue;
+                }
+                let short = (f.w - cw).min(f.h - ch);
+                let long = (f.w - cw).max(f.h - ch);
+                let key = (short, long, f.y, f.x, turned, i);
+                if best.is_none_or(|b| key < b) {
+                    best = Some(key);
+                }
             }
         }
-        let (.., idx) = best?;
+        let (.., turned, idx) = best?;
         let spot = self.free[idx];
+        let (cw, ch) = if turned { (h, w) } else { (w, h) };
         let used = Rect {
             x: spot.x,
             y: spot.y,
-            w,
-            h,
+            w: cw,
+            h: ch,
         };
         self.split_all(used);
-        Some((used.x, used.y))
+        Some((used.x, used.y, turned))
     }
 
     /// Split every free rectangle that overlaps `used`, then prune.
@@ -217,7 +233,8 @@ pub fn pack_pages(sizes: &[(u32, u32)], opts: &PackOptions) -> Result<Vec<Packed
     let bin_h = (opts.max_h - (2 * opts.border).min(opts.max_h)) + opts.padding;
 
     for (i, &(w, h)) in sizes.iter().enumerate() {
-        if w + inflate > bin_w || h + inflate > bin_h {
+        let fits = |w: u32, h: u32| w + inflate <= bin_w && h + inflate <= bin_h;
+        if !(fits(w, h) || (opts.rotate && fits(h, w))) {
             return Err(PackError::Oversize {
                 index: i,
                 fit_w: bin_w.saturating_sub(inflate),
@@ -244,19 +261,21 @@ pub fn pack_pages(sizes: &[(u32, u32)], opts: &PackOptions) -> Result<Vec<Packed
         let mut content_h = 0u32;
         for &i in &remaining {
             let (w, h) = sizes[i];
-            match bin.insert(w + inflate, h + inflate) {
-                Some((x, y)) => {
+            match bin.insert_any(w + inflate, h + inflate, opts.rotate) {
+                Some((x, y, rotated)) => {
                     // insert() returns the padded cell; the sprite's pixels
                     // sit inside it, past the border and the extrusion ring.
                     let px = x + opts.border + opts.extrude;
                     let py = y + opts.border + opts.extrude;
+                    let (pw, ph) = if rotated { (h, w) } else { (w, h) };
                     placements.push(Placement {
                         index: i,
                         x: px,
                         y: py,
+                        rotated,
                     });
-                    content_w = content_w.max(px + w + opts.extrude);
-                    content_h = content_h.max(py + h + opts.extrude);
+                    content_w = content_w.max(px + pw + opts.extrude);
+                    content_h = content_h.max(py + ph + opts.extrude);
                 }
                 None => spill.push(i),
             }
@@ -293,6 +312,7 @@ mod tests {
             border: 0,
             pot: false,
             square: false,
+            rotate: false,
         }
     }
 
@@ -457,5 +477,29 @@ mod tests {
             assert!(p.x + 10 + 3 <= pages[0].w);
             assert!(p.y + 10 + 3 <= pages[0].h);
         }
+    }
+
+    #[test]
+    fn rotation_is_used_only_when_it_helps() {
+        let o = PackOptions {
+            max_w: 64,
+            max_h: 8,
+            rotate: true,
+            ..opts()
+        };
+        let pages = pack_pages(&[(3, 40), (8, 8)], &o).unwrap();
+        assert_eq!(pages.len(), 1);
+        let tall = pages[0].placements.iter().find(|p| p.index == 0).unwrap();
+        let square = pages[0].placements.iter().find(|p| p.index == 1).unwrap();
+        assert!(tall.rotated && !square.rotated);
+        let upright = PackOptions { rotate: false, ..o };
+        assert!(pack_pages(&[(3, 40)], &upright).is_err());
+
+        // Square sprites are never turned: it would change nothing.
+        let squares = pack_pages(&[(8, 8), (8, 8), (5, 5)], &o).unwrap();
+        assert!(squares
+            .iter()
+            .flat_map(|p| &p.placements)
+            .all(|p| !p.rotated));
     }
 }

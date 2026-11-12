@@ -405,3 +405,136 @@ fn pot_and_square_shape_the_page() {
     assert_eq!(w, h);
     assert!(w.is_power_of_two());
 }
+
+// ---------------------------------------------------------------------------
+// Rotation, 9-slice borders, animations
+// ---------------------------------------------------------------------------
+
+/// The first `"key": <number>` after `after` in `text`.
+fn num_after(text: &str, after: &str, key: &str) -> u32 {
+    let start = text.find(after).expect("anchor");
+    let rest = &text[start..];
+    let at = rest.find(&format!("\"{key}\": ")).expect("key") + key.len() + 4;
+    rest[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn rotate_stores_sprites_clockwise_the_way_readers_undo_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    // 3 x 40, every pixel distinct: it only fits a 64 x 8 page turned.
+    let mut tall = RgbaImage::new(3, 40);
+    for (x, y, p) in tall.enumerate_pixels_mut() {
+        *p = Rgba([x as u8 * 80, y as u8 * 6, 7, 255]);
+    }
+    fs::create_dir_all(root.join("s")).unwrap();
+    tall.save(root.join("s/tall.png")).unwrap();
+
+    let without = run_in(
+        root,
+        &["s", "-o", "a", "--max-size", "64x8", "--padding", "0"],
+    );
+    assert_eq!(code(&without), 1, "too tall without --rotate");
+
+    let out = run_in(
+        root,
+        &[
+            "s",
+            "-o",
+            "a",
+            "--max-size",
+            "64x8",
+            "--padding",
+            "0",
+            "--rotate",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let json = fs::read_to_string(root.join("a.json")).unwrap();
+    assert!(json.contains("\"rotated\": true"));
+    // frame w/h stay the unrotated size, as TexturePacker readers expect.
+    assert_eq!(num_after(&json, "\"frame\"", "w"), 3);
+    assert_eq!(num_after(&json, "\"frame\"", "h"), 40);
+    let fx = num_after(&json, "\"frame\"", "x");
+    let fy = num_after(&json, "\"frame\"", "y");
+    let page = image::open(root.join("a.png")).unwrap().to_rgba8();
+    assert_eq!(page.dimensions(), (40, 3));
+    // PixiJS maps sprite (sx, sy) to atlas (fx + h - 1 - sy, fy + sx) for a
+    // rotated frame (groupD8.S, 90 degrees clockwise).
+    for (sx, sy, p) in tall.enumerate_pixels() {
+        assert_eq!(page.get_pixel(fx + 39 - sy, fy + sx), p, "pixel {sx},{sy}");
+    }
+
+    // --rotate cannot be expressed in Godot or CSS output.
+    let godot = run_in(
+        root,
+        &["s", "-o", "g", "--rotate", "--format", "godot-tres"],
+    );
+    assert_eq!(code(&godot), 2);
+}
+
+#[test]
+fn slices_and_animations_land_in_the_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    sprite(&root.join("s/button.png"), 20, 10, RED);
+    sprite(&root.join("s/walk_1.png"), 4, 4, GREEN);
+    sprite(&root.join("s/walk_2.png"), 5, 5, BLUE);
+    sprite(&root.join("s/walk_10.png"), 6, 6, [9, 9, 9, 255]);
+    fs::write(root.join("slices.txt"), "# ui\nbutton.png = 3 2 3 2\n").unwrap();
+
+    let out = run_in(
+        root,
+        &["s", "-o", "a", "--slices", "slices.txt", "--animations"],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let json = fs::read_to_string(root.join("a.json")).unwrap();
+    assert!(json.contains("\"borders\": { \"left\": 3, \"top\": 2, \"right\": 3, \"bottom\": 2 }"));
+    assert!(json.contains("\"walk\": [\"walk_1.png\", \"walk_2.png\", \"walk_10.png\"]"));
+
+    // Editing the slices file makes --check report the atlas stale.
+    let ok = run_in(
+        root,
+        &[
+            "s",
+            "-o",
+            "a",
+            "--slices",
+            "slices.txt",
+            "--animations",
+            "--check",
+        ],
+    );
+    assert_eq!(code(&ok), 0, "{}", stdout(&ok));
+    fs::write(root.join("slices.txt"), "button.png = 4 2 4 2\n").unwrap();
+    let stale = run_in(
+        root,
+        &[
+            "s",
+            "-o",
+            "a",
+            "--slices",
+            "slices.txt",
+            "--animations",
+            "--check",
+        ],
+    );
+    assert_eq!(code(&stale), 1);
+
+    // Unknown frames and borders wider than the image are refused.
+    fs::write(root.join("bad.txt"), "nope.png = 1 1 1 1\n").unwrap();
+    assert_eq!(
+        code(&run_in(root, &["s", "-o", "b", "--slices", "bad.txt"])),
+        2
+    );
+    fs::write(root.join("wide.txt"), "button.png = 15 0 15 0\n").unwrap();
+    assert_eq!(
+        code(&run_in(root, &["s", "-o", "b", "--slices", "wide.txt"])),
+        2
+    );
+}

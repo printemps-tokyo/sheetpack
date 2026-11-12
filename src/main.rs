@@ -104,6 +104,21 @@ struct Cli {
     #[arg(long)]
     strip_ext: bool,
 
+    /// Allow sprites to be stored rotated 90 degrees clockwise when that packs
+    /// tighter (JSON formats only; frames say `"rotated": true`).
+    #[arg(long)]
+    rotate: bool,
+
+    /// 9-slice borders: a file of `<frame> = <left> <top> <right> <bottom>`
+    /// lines, written as each frame's `borders` (JSON formats).
+    #[arg(long, value_name = "FILE")]
+    slices: Option<PathBuf>,
+
+    /// Group frames that differ only by a trailing number (walk_1, walk_2)
+    /// into a top-level `animations` map (JSON formats).
+    #[arg(long)]
+    animations: bool,
+
     /// Path prefix for the atlas image in godot-tres output.
     #[arg(long, default_value = "res://", value_name = "PREFIX")]
     godot_base: String,
@@ -158,6 +173,22 @@ fn run(cli: &Cli) -> Result<u8> {
     if cli.inputs.is_empty() {
         bail!("no inputs given; pass sprite files or directories");
     }
+    if cli.rotate && matches!(format, Format::GodotTres | Format::Css) {
+        bail!(
+            "--rotate needs a JSON format: {} has no way to say a sprite is rotated",
+            format.id()
+        );
+    }
+    let slices_text = match &cli.slices {
+        Some(path) => {
+            Some(fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)
+        }
+        None => None,
+    };
+    let slices = match &slices_text {
+        Some(text) => sheetpack::extras::parse_slices(text).map_err(|e| anyhow::anyhow!(e))?,
+        None => Default::default(),
+    };
 
     let sources = collect_sources(&cli.inputs, cli.strip_ext)?;
     let settings = settings_line(cli, format, max_w, max_h);
@@ -165,6 +196,11 @@ fn run(cli: &Cli) -> Result<u8> {
     // One read per file feeds both the fingerprint and the decoder.
     let mut fp = Fnv1a64::new();
     fp.write(settings.as_bytes());
+    if let Some(text) = &slices_text {
+        // The slices file is an input like any sprite: editing it must make
+        // --check report the atlas stale.
+        add_source(&mut fp, "\0slices", text.as_bytes());
+    }
     let mut raw: Vec<(String, Vec<u8>)> = Vec::with_capacity(sources.len());
     for (name, path) in &sources {
         let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -267,6 +303,29 @@ fn run(cli: &Cli) -> Result<u8> {
     }
     let duplicates = sprites.len() - uniques.len();
 
+    for (name, b) in &slices {
+        let Some((_, _, g)) = sprites.iter().find(|(n, _, _)| n == name) else {
+            bail!("--slices names `{name}`, which is not one of the input frames");
+        };
+        if b.left + b.right > g.source_w || b.top + b.bottom > g.source_h {
+            bail!(
+                "--slices: borders of `{name}` ({} {} {} {}) do not fit its {}x{} image",
+                b.left,
+                b.top,
+                b.right,
+                b.bottom,
+                g.source_w,
+                g.source_h
+            );
+        }
+    }
+    if (cli.slices.is_some() || cli.animations) && matches!(format, Format::GodotTres | Format::Css)
+    {
+        warnings.push(format!(
+            "{} has no place for 9-slice borders or animations; they are not written",
+            format.id()
+        ));
+    }
     let opts = PackOptions {
         max_w,
         max_h,
@@ -275,6 +334,7 @@ fn run(cli: &Cli) -> Result<u8> {
         border: cli.border,
         pot: cli.pot,
         square: cli.square,
+        rotate: cli.rotate,
     };
     let sizes: Vec<(u32, u32)> = uniques
         .iter()
@@ -319,6 +379,8 @@ fn run(cli: &Cli) -> Result<u8> {
                     w,
                     h,
                     geom: *geom,
+                    rotated: pl.rotated,
+                    borders: slices.get(name).copied(),
                 });
             }
         }
@@ -333,10 +395,32 @@ fn run(cli: &Cli) -> Result<u8> {
         });
     }
 
+    let animations = if cli.animations {
+        let names: Vec<String> = sprites.iter().map(|(n, _, _)| n.clone()).collect();
+        sheetpack::extras::group_animations(&names)
+    } else {
+        Vec::new()
+    };
+    if matches!(format, Format::JsonHash | Format::JsonArray) && pages.len() > 1 {
+        for (anim, frames) in &animations {
+            let on_one_page = pages.iter().any(|p| {
+                frames
+                    .iter()
+                    .all(|f| p.frames.iter().any(|pf| &pf.name == f))
+            });
+            if !on_one_page {
+                warnings.push(format!(
+                    "animation `{anim}` spans pages; each page's JSON only lists animations whose \
+                     frames are all on it, so this one is not written"
+                ));
+            }
+        }
+    }
     let meta = Meta {
         fingerprint: current.clone(),
         settings: settings.clone(),
         godot_base: cli.godot_base.clone(),
+        animations,
     };
     let manifests = render(format, &stem, &pages, &meta);
 
@@ -495,8 +579,20 @@ fn parse_max_size(s: &str) -> Result<(u32, u32)> {
 
 fn settings_line(cli: &Cli, format: Format, max_w: u32, max_h: u32) -> String {
     let onoff = |b: bool| if b { "on" } else { "off" };
+    // Options added after the first release are appended only when used, so
+    // existing atlases keep their fingerprints.
+    let mut extra = String::new();
+    if cli.rotate {
+        extra.push_str(" rotate=on");
+    }
+    if cli.slices.is_some() {
+        extra.push_str(" slices=on");
+    }
+    if cli.animations {
+        extra.push_str(" animations=on");
+    }
     format!(
-        "format={} max-size={}x{} padding={} extrude={} border={} trim={} pot={} square={} dedup={} strip-ext={}",
+        "format={} max-size={}x{} padding={} extrude={} border={} trim={} pot={} square={} dedup={} strip-ext={}{extra}",
         format.id(),
         max_w,
         max_h,
@@ -525,8 +621,18 @@ fn compose_page(
 ) -> RgbaImage {
     let mut img = RgbaImage::new(page.w, page.h);
     for pl in &page.placements {
-        let s = &sprites[uniques[pl.index]].1;
-        let (w, h) = sizes[pl.index];
+        let original = &sprites[uniques[pl.index]].1;
+        // A rotated sprite is stored turned 90 degrees clockwise, the way
+        // TexturePacker-JSON readers undo it (PixiJS: rotate = groupD8.S).
+        let turned;
+        let s = if pl.rotated {
+            turned = image::imageops::rotate90(original);
+            &turned
+        } else {
+            original
+        };
+        let (w, h) = s.dimensions();
+        debug_assert_eq!(if pl.rotated { (h, w) } else { (w, h) }, sizes[pl.index]);
         image::imageops::replace(&mut img, s, i64::from(pl.x), i64::from(pl.y));
         for ring in 1..=extrude {
             for yy in 0..h {

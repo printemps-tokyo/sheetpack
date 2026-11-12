@@ -31,9 +31,11 @@ status: current -- the atlas matches today's sprites
 
 ## Features
 
-- MaxRects best-short-side-fit packing (no rotation, by design -- every
-  consumer stays simple), with multipage spill when sprites exceed
-  `--max-size`.
+- MaxRects best-short-side-fit packing with multipage spill when sprites
+  exceed `--max-size`. Sprites stay upright unless you pass `--rotate`.
+- `--rotate` lets a sprite be stored turned 90 degrees clockwise when that
+  packs tighter (JSON formats), `--slices` writes 9-slice `borders`, and
+  `--animations` groups numbered frames into an `animations` map.
 - Deterministic: inputs sorted by frame name, every packing tie broken by
   position, no timestamps or randomness in any output. Two machines produce
   identical atlases, byte for byte.
@@ -63,6 +65,36 @@ Or build from source with a stable Rust toolchain:
 ```
 cargo install --git https://github.com/printemps-tokyo/sheetpack
 ```
+
+## Rotation, 9-slice borders and animations
+
+These follow what PixiJS's `Spritesheet` reads from TexturePacker-style JSON
+(`src/spritesheet/Spritesheet.ts` and `src/maths/matrix/groupD8.ts` at commit
+`1e70768`, read 2026-11-12):
+
+- `--rotate`: a sprite may be placed turned when that scores better. Its frame
+  says `"rotated": true`, `frame.w`/`frame.h` keep the upright size, and the
+  pixels are stored turned 90 degrees clockwise, filling `h` x `w` on the page
+  -- PixiJS undoes this with `rotate = groupD8.S` (90 degrees clockwise), and
+  a test checks every pixel against that mapping. On equal scores a sprite
+  stays upright, and square sprites are never turned. Only the JSON formats can
+  say a frame is rotated, so `--rotate` with `godot-tres` or `css` is refused.
+- `--slices FILE`: one `<frame name> = <left> <top> <right> <bottom>` line per
+  9-slice sprite (`#` comments allowed; the name is everything before the last
+  `=`), written as the frame's `"borders": {left, top, right, bottom}`, in
+  pixels of the source image. Unknown frames and borders wider than the image
+  are refused. The file is part of the fingerprint, so editing it makes
+  `--check` fail until the atlas is regenerated.
+- `--animations`: frames whose names differ only by a trailing number
+  (`walk_1.png`, `walk_2.png`, `walk_10.png`; a `_`, `-`, `.` or space before
+  the number is dropped from the group name) become a top-level
+  `"animations": {"walk": [...]}` in numeric order; groups need at least two
+  frames. With several pages, each page's JSON lists the animations whose
+  frames all sit on it, and a group split across pages is reported as a
+  warning (`phaser-multiatlas` has one file, so it always lists every group).
+
+These options appear in the settings line (and so in the fingerprint) only
+when used, so atlases made without them keep their fingerprints.
 
 ## Manifest formats
 
@@ -132,6 +164,9 @@ sheetpack [INPUT]... [OPTIONS]
       --square             force square pages
       --no-dedup           identical sprites keep separate rectangles
       --strip-ext          drop file extensions from frame names
+      --rotate             allow sprites stored rotated 90 degrees (JSON formats)
+      --slices <FILE>      9-slice borders: `<frame> = <left> <top> <right> <bottom>`
+      --animations         group walk_1, walk_2, ... into an "animations" map
       --godot-base <P>     image path prefix for godot-tres (default: res://)
       --dry-run            plan and report, write nothing
       --check              verify the committed atlas, exit 1 if stale
@@ -154,7 +189,7 @@ error, not a silent overwrite.
 
 ## Limitations
 
-- No rotation and no polygon packing -- rectangles only. This costs some
+- No polygon packing -- rectangles only. Rotation is opt-in. This costs some
   density and keeps every manifest consumer simple.
 - Pages are packed against the `--max-size` bin and then shrunk to content,
   which favours tall or wide pages over near-square ones for small sprite

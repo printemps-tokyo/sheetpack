@@ -17,6 +17,7 @@
 //!    can tell whether the committed atlas is stale.
 
 pub mod check;
+pub mod extras;
 pub mod fingerprint;
 pub mod formats;
 pub mod json;

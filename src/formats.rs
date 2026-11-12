@@ -146,17 +146,59 @@ fn size_obj(w: u32, h: u32) -> String {
 /// The body shared by every TexturePacker-style frame entry.
 fn frame_fields(f: &Frame, indent: &str) -> String {
     let g = &f.geom;
-    format!(
+    let mut out = format!(
         "{indent}\"frame\": {},\n\
-         {indent}\"rotated\": false,\n\
+         {indent}\"rotated\": {},\n\
          {indent}\"trimmed\": {},\n\
          {indent}\"spriteSourceSize\": {},\n\
          {indent}\"sourceSize\": {}",
         rect_obj(f.x, f.y, f.w, f.h),
+        f.rotated,
         g.trimmed,
         rect_obj(g.trim_x, g.trim_y, f.w, f.h),
         size_obj(g.source_w, g.source_h),
-    )
+    );
+    if let Some(b) = f.borders {
+        let _ = write!(
+            out,
+            ",\n{indent}\"borders\": {{ \"left\": {}, \"top\": {}, \"right\": {}, \"bottom\": {} }}",
+            b.left, b.top, b.right, b.bottom
+        );
+    }
+    out
+}
+
+/// The top-level `"animations"` member (with a trailing comma and newline),
+/// listing the groups whose frames are all among `on_page`; empty when there
+/// are none.
+fn animations_member(meta: &Meta, on_page: Option<&Page>) -> String {
+    let groups: Vec<&(String, Vec<String>)> = meta
+        .animations
+        .iter()
+        .filter(|(_, frames)| {
+            on_page.is_none_or(|p| {
+                frames
+                    .iter()
+                    .all(|f| p.frames.iter().any(|pf| &pf.name == f))
+            })
+        })
+        .collect();
+    if groups.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("  \"animations\": {\n");
+    for (i, (name, frames)) in groups.iter().enumerate() {
+        let list: Vec<String> = frames.iter().map(|f| quote(f)).collect();
+        let _ = write!(
+            out,
+            "    {}: [{}]{}",
+            quote(name),
+            list.join(", "),
+            sep(i, groups.len())
+        );
+    }
+    out.push_str("  },\n");
+    out
 }
 
 /// The `"sheetpack": {...}` provenance block inside `meta`.
@@ -199,6 +241,7 @@ fn page_json(page: &Page, meta: &Meta, array: bool) -> String {
         }
         out.push_str("  },\n");
     }
+    out.push_str(&animations_member(meta, Some(page)));
     let _ = write!(
         out,
         "  \"meta\": {{\n\
@@ -243,9 +286,11 @@ fn multiatlas_json(pages: &[Page], meta: &Meta) -> String {
         }
         let _ = write!(out, "      ]\n    }}{}", sep(pi, pages.len()));
     }
+    out.push_str("  ],\n");
+    out.push_str(&animations_member(meta, None));
     let _ = write!(
         out,
-        "  ],\n  \"meta\": {{\n\
+        "  \"meta\": {{\n\
          \x20   \"app\": {},\n\
          \x20   \"version\": {},\n{}\n  }}\n}}\n",
         quote(APP),
@@ -350,6 +395,8 @@ mod tests {
                         trim_y: 1,
                         trimmed: true,
                     },
+                    rotated: false,
+                    borders: None,
                 },
                 Frame {
                     name: "tile.png".into(),
@@ -366,6 +413,8 @@ mod tests {
                         trim_y: 0,
                         trimmed: false,
                     },
+                    rotated: false,
+                    borders: None,
                 },
             ],
         }
@@ -376,6 +425,7 @@ mod tests {
             fingerprint: "00000000deadbeef".into(),
             settings: "padding=2".into(),
             godot_base: "res://".into(),
+            animations: Vec::new(),
         }
     }
 
